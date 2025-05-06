@@ -1,6 +1,7 @@
 name: Build & Upload (Android, iOS)
  
 on:
+  push:
   workflow_dispatch:
     inputs:
       environment:
@@ -15,7 +16,7 @@ on:
  
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: self-hosted
     timeout-minutes: 20
     environment: ${{ github.event.inputs.environment || 'prod' }}
     env:
@@ -32,9 +33,9 @@ jobs:
         # Uncomment this line if you want to use a specific Flutter version:
         flutter-version: '3.27.3'
         # Enable caching: https://github.com/subosito/flutter-action?tab=readme-ov-file#caching
-        cache: true
-        cache-key: "flutter-:os:-:channel:-:version:-:arch:-:hash:"
-        cache-path: "${{ runner.tool_cache }}/flutter/:channel:-:version:-:arch:"
+        # cache: true
+        # cache-key: "flutter-:os:-:channel:-:version:-:arch:-:hash:"
+        # cache-path: "${{ runner.tool_cache }}/flutter/:channel:-:version:-:arch:"
 
     # Generate .env.<flavor> file as it is gitignored but needed for the build
     - name: Setup Dart Defines
@@ -56,6 +57,6 @@ jobs:
         echo "$FIREBASE_JSON" | base64 --decode > firebase.json
         # Needed by the "flutterfire bundle-service-file" build phase in Xcode
         dart pub global activate flutterfire_cli
-        
+
     - name: Build Android App
       run: flutter build appbundle --flavor ${{ env.DEPLOY_ENV }} -t lib/main_${{ env.DEPLOY_ENV }}.dart  --dart-define-from-file=.env.${{ env.DEPLOY_ENV }}
