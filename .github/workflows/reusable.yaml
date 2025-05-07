@@ -15,16 +15,15 @@ on:
         - prod
  
 jobs:
-  build:
+  ###################################
+  # Initial Setup
+  ###################################
+  setup:
     runs-on: self-hosted
     timeout-minutes: 20
     environment: ${{ github.event.inputs.environment || 'prod' }}
     env:
       DEPLOY_ENV: ${{ github.event.inputs.environment || 'prod' }}
-      APP_STORE_CONNECT_ISSUER_ID: ${{ vars.APP_STORE_CONNECT_ISSUER_ID }}
-      APP_STORE_CONNECT_KEY_IDENTIFIER: ${{ vars.APP_STORE_CONNECT_KEY_IDENTIFIER }}
-      APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
-      CERTIFICATE_PRIVATE_KEY: ${{ secrets.CERTIFICATE_PRIVATE_KEY }}
  
     steps:
     - name: Clone repository
@@ -33,18 +32,17 @@ jobs:
     - name: Setup Flutter
       uses: subosito/flutter-action@v2
       with:
-        # channel: 'stable'
-        # Uncomment this line if you want to use a specific Flutter version:
-        flutter-version: '3.27.3'
-        # Enable caching: https://github.com/subosito/flutter-action?tab=readme-ov-file#caching
+        channel: 'stable'
+        # * Reminder: enable caching on GitHub-hosted runners, disable on self-hosted runners
+        # Syntax reference: https://github.com/subosito/flutter-action?tab=readme-ov-file#caching
         # cache: true
         # cache-key: "flutter-:os:-:channel:-:version:-:arch:-:hash:"
         # cache-path: "${{ runner.tool_cache }}/flutter/:channel:-:version:-:arch:"
-
+ 
     # Generate .env.<flavor> file as it is gitignored but needed for the build
     - name: Setup Dart Defines
       run: echo "${{ secrets.DART_DEFINES }}" | base64 --decode > .env.${{ env.DEPLOY_ENV }}
-
+    
     # Write all the gitignored Firebase files that are needed for the build
     # You can remove this step if you've added them to Git
     - name: Setup Firebase
@@ -61,7 +59,36 @@ jobs:
         echo "$FIREBASE_JSON" | base64 --decode > firebase.json
         # Needed by the "flutterfire bundle-service-file" build phase in Xcode
         dart pub global activate flutterfire_cli
-
+        
+    - name: Upload build files
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-files
+        path: |
+          .env.${{ env.DEPLOY_ENV }}
+          lib/firebase_options_${{ env.DEPLOY_ENV }}.dart
+          android/app/src/${{ env.DEPLOY_ENV }}/google-services.json
+          ios/flavors/${{ env.DEPLOY_ENV }}/GoogleService-Info.plist
+          firebase.json
+ 
+  ###################################
+  # Build and Upload Android app
+  ###################################
+  build-android:
+    needs:
+      - setup
+    runs-on: self-hosted
+    timeout-minutes: 20
+    environment: ${{ github.event.inputs.environment || 'prod' }}
+    env:
+      DEPLOY_ENV: ${{ github.event.inputs.environment || 'prod' }}
+ 
+    steps:
+    - name: Download build files
+      uses: actions/download-artifact@v4
+      with:
+        name: build-files
+    
     # Generate all the files needed for Android code signing
     - name: Setup Android Keystore
       env:
@@ -75,10 +102,11 @@ jobs:
         echo "storePassword=${{ env.ANDROID_KEYSTORE_PASSWORD }}" >> android/key.properties
         echo "keyPassword=${{ env.ANDROID_KEY_PASSWORD }}" >> android/key.properties
         echo "keyAlias=${{ env.ANDROID_KEY_ALIAS }}" >> android/key.properties
-
+ 
     - name: Build Android App
-      run: flutter build appbundle --flavor ${{ env.DEPLOY_ENV }} -t lib/main_${{ env.DEPLOY_ENV }}.dart  --dart-define-from-file=.env.${{ env.DEPLOY_ENV }}
-
+      run:
+        flutter build appbundle --flavor ${{ env.DEPLOY_ENV }} -t lib/main_${{ env.DEPLOY_ENV }}.dart --dart-define-from-file=.env.${{ env.DEPLOY_ENV }} --obfuscate --split-debug-info=build
+ 
     - name: Prepare for Upload
       run: |
         PACKAGE_NAME=$(grep -E "namespace\s*=\s*\"[^\"]+\"" android/app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/')
@@ -97,8 +125,36 @@ jobs:
         packageName: ${{ env.PACKAGE_NAME }}
         releaseFiles: ${{ env.AAB_PATH }}
         track: 'production'
-
-   # https://docs.codemagic.io/knowledge-codemagic/codemagic-cli-tools/
+ 
+    - name: Upload debug symbols
+      uses: actions/upload-artifact@v4
+      with:
+        name: debug-symbols-android
+        path: |
+          build/app.android*.symbols
+ 
+  ###################################
+  # Build and Upload iOS app
+  ###################################
+  build-ios:
+    needs:
+      - setup
+    runs-on: self-hosted
+    timeout-minutes: 20
+    environment: ${{ github.event.inputs.environment || 'prod' }}
+    env:
+      DEPLOY_ENV: ${{ github.event.inputs.environment || 'prod' }}
+      APP_STORE_CONNECT_ISSUER_ID: ${{ vars.APP_STORE_CONNECT_ISSUER_ID }}
+      APP_STORE_CONNECT_KEY_IDENTIFIER: ${{ vars.APP_STORE_CONNECT_KEY_IDENTIFIER }}
+      APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+      CERTIFICATE_PRIVATE_KEY: ${{ secrets.CERTIFICATE_PRIVATE_KEY }}
+ 
+    steps:
+    - name: Download build files
+      uses: actions/download-artifact@v4
+      with:
+        name: build-files    
+    # https://docs.codemagic.io/knowledge-codemagic/codemagic-cli-tools/
     - name: Install Codemagic CLI tools
       run: pip install codemagic-cli-tools
  
@@ -123,12 +179,40 @@ jobs:
  
     - name: Build iOS App
       run:
-        flutter build ipa --export-options-plist=$HOME/export_options.plist --flavor ${{ env.DEPLOY_ENV }} -t lib/main_${{ env.DEPLOY_ENV }}.dart --dart-define-from-file=.env.${{ env.DEPLOY_ENV }}
+        flutter build ipa --export-options-plist=$HOME/export_options.plist --flavor ${{ env.DEPLOY_ENV }} -t lib/main_${{ env.DEPLOY_ENV }}.dart --dart-define-from-file=.env.${{ env.DEPLOY_ENV }} --obfuscate --split-debug-info=build
  
     - name: Upload to App Store Connect
       run: |
         IPA_FILE=$(find build/ios/ipa -name "*.ipa")
         app-store-connect publish --path "$IPA_FILE"
-
+ 
+    - name: Upload debug symbols
+      uses: actions/upload-artifact@v4
+      with:
+        name: debug-symbols-ios
+        path: |
+          build/ios/archive/Runner.xcarchive/dSYMs/        
+ 
+  ###################################
+  # Upload Debug Symbols to Sentry
+  ###################################
+  upload-sentry:
+    needs:
+      - build-android
+      - build-ios
+    runs-on: self-hosted
+    timeout-minutes: 20
+    
+    steps:
+    - name: Download Android debug symbols
+      uses: actions/download-artifact@v4
+      with:
+        name: debug-symbols-android
+        
+    - name: Download iOS debug symbols
+      uses: actions/download-artifact@v4
+      with:
+        name: debug-symbols-ios
+ 
     - name: Upload Debug Symbols to Sentry
       run: dart run sentry_dart_plugin
